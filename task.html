@@ -1,0 +1,976 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TaskFlow - Управление задачами</title>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&family=Playfair+Display:wght@400;700&display=swap');
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'JetBrains Mono', monospace;
+        }
+        
+        body {
+            background: linear-gradient(to bottom right, #020617, #0f172a, #020617);
+            min-height: 100vh;
+        }
+        
+        .title-font {
+            font-family: 'Playfair Display', serif;
+        }
+        
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        
+        .animate-slide-in {
+            animation: slideIn 0.4s ease-out;
+        }
+        
+        .animate-fade-in {
+            animation: fadeIn 0.3s ease-out;
+        }
+        
+        .glass-card {
+            background: rgba(15, 23, 42, 0.6);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(251, 191, 36, 0.1);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+        }
+        
+        .glass-card:hover {
+            border-color: rgba(251, 191, 36, 0.3);
+            box-shadow: 0 12px 48px rgba(251, 191, 36, 0.1);
+            transition: all 0.3s ease;
+        }
+        
+        .btn-primary {
+            background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 16px rgba(245, 158, 11, 0.3);
+            border: none;
+            cursor: pointer;
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 24px rgba(245, 158, 11, 0.4);
+        }
+        
+        .btn-primary:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        .status-badge {
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+        
+        .priority-indicator {
+            width: 4px;
+            height: 100%;
+            position: absolute;
+            left: 0;
+            top: 0;
+            border-radius: 8px 0 0 8px;
+        }
+        
+        .notification {
+            animation: slideIn 0.3s ease-out;
+        }
+        
+        input, textarea, select {
+            outline: none;
+        }
+        
+        button {
+            cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+        const { createRoot } = ReactDOM;
+
+        // Lucide Icons
+        const Icon = ({ name, size = 20, ...props }) => {
+            useEffect(() => {
+                lucide.createIcons();
+            });
+            return React.createElement('i', { 
+                'data-lucide': name, 
+                ...props,
+                style: { width: size, height: size }
+            });
+        };
+
+        // LocalStorage utilities
+        const storage = {
+            get(key) {
+                try {
+                    const item = localStorage.getItem(key);
+                    return item ? JSON.parse(item) : null;
+                } catch {
+                    return null;
+                }
+            },
+            set(key, value) {
+                try {
+                    localStorage.setItem(key, JSON.stringify(value));
+                    return true;
+                } catch (error) {
+                    console.error('Storage error:', error);
+                    return false;
+                }
+            }
+        };
+
+        // Telegram Bot Integration
+        const sendTelegramNotification = async (botToken, chatId, message) => {
+            if (!botToken || !chatId) return { success: false, error: 'Не настроен Telegram бот' };
+            
+            try {
+                const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        chat_id: chatId,
+                        text: message,
+                        parse_mode: 'HTML'
+                    })
+                });
+                
+                const data = await response.json();
+                return { success: data.ok, error: data.ok ? null : data.description };
+            } catch (error) {
+                return { success: false, error: error.message };
+            }
+        };
+
+        const TaskManager = () => {
+            const [view, setView] = useState('dashboard');
+            const [tasks, setTasks] = useState([]);
+            const [employees, setEmployees] = useState([]);
+            const [config, setConfig] = useState({ botToken: '', chatId: '' });
+            const [loading, setLoading] = useState(true);
+            const [showTaskModal, setShowTaskModal] = useState(false);
+            const [showEmployeeModal, setShowEmployeeModal] = useState(false);
+            const [showConfigModal, setShowConfigModal] = useState(false);
+            const [editingTask, setEditingTask] = useState(null);
+            const [editingEmployee, setEditingEmployee] = useState(null);
+            const [searchQuery, setSearchQuery] = useState('');
+            const [filterStatus, setFilterStatus] = useState('all');
+            const [filterEmployee, setFilterEmployee] = useState('all');
+            const [notification, setNotification] = useState(null);
+
+            useEffect(() => {
+                loadData();
+            }, []);
+
+            const loadData = () => {
+                setLoading(true);
+                const loadedTasks = storage.get('taskflow_tasks') || [];
+                const loadedEmployees = storage.get('taskflow_employees') || [];
+                const loadedConfig = storage.get('taskflow_config') || { botToken: '', chatId: '' };
+                
+                setTasks(loadedTasks);
+                setEmployees(loadedEmployees);
+                setConfig(loadedConfig);
+                setLoading(false);
+            };
+
+            const showNotification = (message, type = 'success') => {
+                setNotification({ message, type });
+                setTimeout(() => setNotification(null), 3000);
+            };
+
+            const saveTask = async (taskData) => {
+                const newTask = {
+                    id: editingTask?.id || Date.now().toString(),
+                    ...taskData,
+                    createdAt: editingTask?.createdAt || new Date().toISOString(),
+                    updatedAt: new Date().toISOString(),
+                    history: editingTask?.history || []
+                };
+
+                if (editingTask) {
+                    newTask.history.push({
+                        timestamp: new Date().toISOString(),
+                        action: 'updated',
+                        changes: taskData
+                    });
+                }
+
+                const updatedTasks = editingTask
+                    ? tasks.map(t => t.id === editingTask.id ? newTask : t)
+                    : [...tasks, newTask];
+
+                storage.set('taskflow_tasks', updatedTasks);
+                setTasks(updatedTasks);
+
+                if (!editingTask) {
+                    const employee = employees.find(e => e.id === taskData.employeeId);
+                    if (employee && config.botToken && config.chatId) {
+                        const message = `🆕 <b>Новая задача</b>
+
+👤 Исполнитель: ${employee.telegramTag ? '@' + employee.telegramTag : employee.name}
+📋 Задача: ${taskData.title}
+📝 Описание: ${taskData.description}
+⏰ Срок: ${new Date(taskData.deadline).toLocaleDateString('ru-RU')}
+🔥 Приоритет: ${taskData.priority === 'high' ? 'Высокий' : taskData.priority === 'medium' ? 'Средний' : 'Низкий'}
+
+#задача #${employee.telegramTag || employee.name.replace(/\s/g, '')}`;
+
+                        const result = await sendTelegramNotification(config.botToken, config.chatId, message);
+                        if (result.success) {
+                            showNotification('Задача создана и уведомление отправлено в Telegram');
+                        } else {
+                            showNotification('Задача создана, но ошибка отправки в Telegram: ' + result.error, 'warning');
+                        }
+                    } else {
+                        showNotification('Задача создана (Telegram не настроен)', 'info');
+                    }
+                } else {
+                    showNotification('Задача обновлена');
+                }
+
+                setShowTaskModal(false);
+                setEditingTask(null);
+            };
+
+            const updateTaskStatus = async (taskId, newStatus, result = '') => {
+                const task = tasks.find(t => t.id === taskId);
+                const employee = employees.find(e => e.id === task.employeeId);
+                
+                const updatedTask = {
+                    ...task,
+                    status: newStatus,
+                    result: newStatus === 'completed' ? result : task.result,
+                    completedAt: newStatus === 'completed' ? new Date().toISOString() : task.completedAt,
+                    history: [
+                        ...task.history,
+                        {
+                            timestamp: new Date().toISOString(),
+                            action: 'status_changed',
+                            oldStatus: task.status,
+                            newStatus: newStatus,
+                            result: result
+                        }
+                    ]
+                };
+
+                const updatedTasks = tasks.map(t => t.id === taskId ? updatedTask : t);
+                storage.set('taskflow_tasks', updatedTasks);
+                setTasks(updatedTasks);
+
+                if (newStatus === 'completed' && config.botToken && config.chatId) {
+                    const message = `✅ <b>Задача выполнена</b>
+
+👤 Исполнитель: ${employee?.telegramTag ? '@' + employee.telegramTag : employee?.name}
+📋 Задача: ${task.title}
+✨ Результат: ${result}
+
+#выполнено #${employee?.telegramTag || employee?.name.replace(/\s/g, '')}`;
+                    
+                    await sendTelegramNotification(config.botToken, config.chatId, message);
+                }
+
+                showNotification('Статус обновлен');
+            };
+
+            const deleteTask = (taskId) => {
+                if (!confirm('Удалить эту задачу?')) return;
+                const updatedTasks = tasks.filter(t => t.id !== taskId);
+                storage.set('taskflow_tasks', updatedTasks);
+                setTasks(updatedTasks);
+                showNotification('Задача удалена');
+            };
+
+            const saveEmployee = (employeeData) => {
+                const newEmployee = {
+                    id: editingEmployee?.id || Date.now().toString(),
+                    ...employeeData,
+                    createdAt: editingEmployee?.createdAt || new Date().toISOString()
+                };
+
+                const updatedEmployees = editingEmployee
+                    ? employees.map(e => e.id === editingEmployee.id ? newEmployee : e)
+                    : [...employees, newEmployee];
+
+                storage.set('taskflow_employees', updatedEmployees);
+                setEmployees(updatedEmployees);
+                showNotification(editingEmployee ? 'Сотрудник обновлён' : 'Сотрудник добавлен');
+                setShowEmployeeModal(false);
+                setEditingEmployee(null);
+            };
+
+            const deleteEmployee = (employeeId) => {
+                const hasTasks = tasks.some(t => t.employeeId === employeeId);
+                if (hasTasks) {
+                    alert('Нельзя удалить сотрудника, у которого есть задачи');
+                    return;
+                }
+                if (!confirm('Удалить этого сотрудника?')) return;
+                
+                const updatedEmployees = employees.filter(e => e.id !== employeeId);
+                storage.set('taskflow_employees', updatedEmployees);
+                setEmployees(updatedEmployees);
+                showNotification('Сотрудник удалён');
+            };
+
+            const saveConfig = (configData) => {
+                storage.set('taskflow_config', configData);
+                setConfig(configData);
+                showNotification('Настройки сохранены');
+                setShowConfigModal(false);
+            };
+
+            const filteredTasks = tasks.filter(task => {
+                const matchesSearch = task.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                                     task.description.toLowerCase().includes(searchQuery.toLowerCase());
+                const matchesStatus = filterStatus === 'all' || task.status === filterStatus;
+                const matchesEmployee = filterEmployee === 'all' || task.employeeId === filterEmployee;
+                return matchesSearch && matchesStatus && matchesEmployee;
+            });
+
+            const stats = {
+                total: tasks.length,
+                new: tasks.filter(t => t.status === 'new').length,
+                inProgress: tasks.filter(t => t.status === 'in_progress').length,
+                completed: tasks.filter(t => t.status === 'completed').length,
+                overdue: tasks.filter(t => t.status !== 'completed' && new Date(t.deadline) < new Date()).length
+            };
+
+            if (loading) {
+                return (
+                    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 flex items-center justify-center">
+                        <div className="text-amber-400 text-2xl font-light animate-pulse">Загрузка...</div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
+                    {notification && (
+                        <div className={`fixed top-4 right-4 z-50 notification glass-card rounded-lg p-4 flex items-center gap-3 ${
+                            notification.type === 'success' ? 'border-green-500/30' :
+                            notification.type === 'warning' ? 'border-yellow-500/30' : 'border-blue-500/30'
+                        }`} style={{ border: '1px solid' }}>
+                            <div className={`w-2 h-2 rounded-full ${
+                                notification.type === 'success' ? 'bg-green-500' :
+                                notification.type === 'warning' ? 'bg-yellow-500' : 'bg-blue-500'
+                            }`} style={{ width: '8px', height: '8px', borderRadius: '50%' }}></div>
+                            <span className="text-slate-200 text-sm">{notification.message}</span>
+                        </div>
+                    )}
+
+                    <header className="glass-card border-b border-amber-500/10 sticky top-0 z-40" style={{ borderBottom: '1px solid rgba(251, 191, 36, 0.1)', position: 'sticky', top: 0, zIndex: 40 }}>
+                        <div className="max-w-7xl mx-auto px-6 py-5 flex items-center justify-between" style={{ maxWidth: '80rem', margin: '0 auto', padding: '1.25rem 1.5rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <div>
+                                <h1 className="text-3xl font-bold text-amber-400 title-font tracking-tight" style={{ fontSize: '1.875rem', fontWeight: 'bold', color: '#fbbf24', letterSpacing: 'tight' }}>TaskFlow</h1>
+                                <p className="text-slate-400 text-xs mt-1" style={{ color: '#94a3b8', fontSize: '0.75rem', marginTop: '0.25rem' }}>Управление задачами команды</p>
+                            </div>
+                            
+                            <nav className="flex items-center gap-4" style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                                <button
+                                    onClick={() => setView('dashboard')}
+                                    className={`px-4 py-2 rounded-lg transition-all ${view === 'dashboard' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}
+                                    style={{ padding: '0.5rem 1rem', borderRadius: '0.5rem', transition: 'all 0.3s', backgroundColor: view === 'dashboard' ? 'rgba(251, 191, 36, 0.2)' : 'transparent', color: view === 'dashboard' ? '#fbbf24' : '#94a3b8', border: view === 'dashboard' ? '1px solid rgba(251, 191, 36, 0.3)' : 'none' }}
+                                >
+                                    <Icon name="bar-chart-3" size={18} /> Дашборд
+                                </button>
+                                <button
+                                    onClick={() => setView('tasks')}
+                                    className={`px-4 py-2 rounded-lg transition-all ${view === 'tasks' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}
+                                    style={{ padding: '0.5rem 1rem', borderRadius: '0.5rem', transition: 'all 0.3s', backgroundColor: view === 'tasks' ? 'rgba(251, 191, 36, 0.2)' : 'transparent', color: view === 'tasks' ? '#fbbf24' : '#94a3b8', border: view === 'tasks' ? '1px solid rgba(251, 191, 36, 0.3)' : 'none' }}
+                                >
+                                    <Icon name="check-circle" size={18} /> Задачи
+                                </button>
+                                <button
+                                    onClick={() => setView('employees')}
+                                    className={`px-4 py-2 rounded-lg transition-all ${view === 'employees' ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30' : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'}`}
+                                    style={{ padding: '0.5rem 1rem', borderRadius: '0.5rem', transition: 'all 0.3s', backgroundColor: view === 'employees' ? 'rgba(251, 191, 36, 0.2)' : 'transparent', color: view === 'employees' ? '#fbbf24' : '#94a3b8', border: view === 'employees' ? '1px solid rgba(251, 191, 36, 0.3)' : 'none' }}
+                                >
+                                    <Icon name="users" size={18} /> Сотрудники
+                                </button>
+                                <button
+                                    onClick={() => setShowConfigModal(true)}
+                                    className="p-2 text-slate-400 hover:text-amber-400 hover:bg-slate-800/50 rounded-lg transition-all"
+                                    title="Настройки Telegram"
+                                    style={{ padding: '0.5rem', color: '#94a3b8', borderRadius: '0.5rem', transition: 'all 0.3s' }}
+                                >
+                                    <Icon name="settings" size={20} />
+                                </button>
+                            </nav>
+                        </div>
+                    </header>
+
+                    <main className="max-w-7xl mx-auto px-6 py-8" style={{ maxWidth: '80rem', margin: '0 auto', padding: '2rem 1.5rem' }}>
+                        {view === 'dashboard' && <DashboardView stats={stats} tasks={tasks} employees={employees} setEditingTask={setEditingTask} setShowTaskModal={setShowTaskModal} />}
+                        {view === 'tasks' && <TasksView tasks={filteredTasks} employees={employees} searchQuery={searchQuery} setSearchQuery={setSearchQuery} filterStatus={filterStatus} setFilterStatus={setFilterStatus} filterEmployee={filterEmployee} setFilterEmployee={setFilterEmployee} updateTaskStatus={updateTaskStatus} deleteTask={deleteTask} setEditingTask={setEditingTask} setShowTaskModal={setShowTaskModal} />}
+                        {view === 'employees' && <EmployeesView employees={employees} tasks={tasks} setEditingEmployee={setEditingEmployee} setShowEmployeeModal={setShowEmployeeModal} deleteEmployee={deleteEmployee} />}
+                    </main>
+
+                    {showTaskModal && <TaskModal task={editingTask} employees={employees} onSave={saveTask} onClose={() => { setShowTaskModal(false); setEditingTask(null); }} />}
+                    {showEmployeeModal && <EmployeeModal employee={editingEmployee} onSave={saveEmployee} onClose={() => { setShowEmployeeModal(false); setEditingEmployee(null); }} />}
+                    {showConfigModal && <ConfigModal config={config} onSave={saveConfig} onClose={() => setShowConfigModal(false)} />}
+                </div>
+            );
+        };
+
+        // Dashboard View Component
+        const DashboardView = ({ stats, tasks, employees, setEditingTask, setShowTaskModal }) => (
+            <div className="animate-slide-in space-y-8" style={{ animationName: 'slideIn', animationDuration: '0.4s' }}>
+                <div className="flex items-center justify-between" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '2rem' }}>
+                    <h2 className="text-2xl font-bold text-slate-200" style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#e2e8f0' }}>Обзор задач</h2>
+                    <button onClick={() => { setEditingTask(null); setShowTaskModal(true); }} className="btn-primary text-white px-6 py-3 rounded-lg font-semibold flex items-center gap-2" style={{ padding: '0.75rem 1.5rem', borderRadius: '0.5rem', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <Icon name="plus" size={20} /> Создать задачу
+                    </button>
+                </div>
+
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-4" style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '1rem' }}>
+                    <div className="glass-card rounded-xl p-6" style={{ borderRadius: '0.75rem', padding: '1.5rem' }}>
+                        <div className="text-slate-400 text-sm mb-2" style={{ color: '#94a3b8', fontSize: '0.875rem', marginBottom: '0.5rem' }}>Всего задач</div>
+                        <div className="text-3xl font-bold text-slate-200" style={{ fontSize: '1.875rem', fontWeight: 'bold', color: '#e2e8f0' }}>{stats.total}</div>
+                    </div>
+                    <div className="glass-card rounded-xl p-6 border-blue-500/20" style={{ borderRadius: '0.75rem', padding: '1.5rem', border: '1px solid rgba(59, 130, 246, 0.2)' }}>
+                        <div className="text-slate-400 text-sm mb-2" style={{ color: '#94a3b8', fontSize: '0.875rem', marginBottom: '0.5rem' }}>Новые</div>
+                        <div className="text-3xl font-bold text-blue-400" style={{ fontSize: '1.875rem', fontWeight: 'bold', color: '#60a5fa' }}>{stats.new}</div>
+                    </div>
+                    <div className="glass-card rounded-xl p-6 border-purple-500/20" style={{ borderRadius: '0.75rem', padding: '1.5rem', border: '1px solid rgba(168, 85, 247, 0.2)' }}>
+                        <div className="text-slate-400 text-sm mb-2" style={{ color: '#94a3b8', fontSize: '0.875rem', marginBottom: '0.5rem' }}>В работе</div>
+                        <div className="text-3xl font-bold text-purple-400" style={{ fontSize: '1.875rem', fontWeight: 'bold', color: '#c084fc' }}>{stats.inProgress}</div>
+                    </div>
+                    <div className="glass-card rounded-xl p-6 border-green-500/20" style={{ borderRadius: '0.75rem', padding: '1.5rem', border: '1px solid rgba(34, 197, 94, 0.2)' }}>
+                        <div className="text-slate-400 text-sm mb-2" style={{ color: '#94a3b8', fontSize: '0.875rem', marginBottom: '0.5rem' }}>Выполнено</div>
+                        <div className="text-3xl font-bold text-green-400" style={{ fontSize: '1.875rem', fontWeight: 'bold', color: '#4ade80' }}>{stats.completed}</div>
+                    </div>
+                    <div className="glass-card rounded-xl p-6 border-red-500/20" style={{ borderRadius: '0.75rem', padding: '1.5rem', border: '1px solid rgba(239, 68, 68, 0.2)' }}>
+                        <div className="text-slate-400 text-sm mb-2" style={{ color: '#94a3b8', fontSize: '0.875rem', marginBottom: '0.5rem' }}>Просрочено</div>
+                        <div className="text-3xl font-bold text-red-400" style={{ fontSize: '1.875rem', fontWeight: 'bold', color: '#f87171' }}>{stats.overdue}</div>
+                    </div>
+                </div>
+
+                {stats.overdue > 0 && (
+                    <div className="glass-card rounded-xl p-6 border-red-500/30" style={{ borderRadius: '0.75rem', padding: '1.5rem', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
+                        <h3 className="text-xl font-bold text-red-400 mb-4 flex items-center gap-2" style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#f87171', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                            <Icon name="alert-triangle" size={24} /> Просроченные задачи
+                        </h3>
+                        <div className="space-y-3" style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                            {tasks.filter(t => t.status !== 'completed' && new Date(t.deadline) < new Date()).map(task => {
+                                const employee = employees.find(e => e.id === task.employeeId);
+                                return (
+                                    <div key={task.id} className="bg-red-500/10 border border-red-500/30 rounded-lg p-4" style={{ backgroundColor: 'rgba(239, 68, 68, 0.1)', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: '0.5rem', padding: '1rem' }}>
+                                        <div className="flex justify-between items-start" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
+                                            <div>
+                                                <h4 className="text-slate-200 font-semibold" style={{ color: '#e2e8f0', fontWeight: '600' }}>{task.title}</h4>
+                                                <p className="text-slate-400 text-sm mt-1" style={{ color: '#94a3b8', fontSize: '0.875rem', marginTop: '0.25rem' }}>{employee?.name}</p>
+                                            </div>
+                                            <span className="text-red-400 text-sm font-semibold" style={{ color: '#f87171', fontSize: '0.875rem', fontWeight: '600' }}>
+                                                {new Date(task.deadline).toLocaleDateString('ru-RU')}
+                                            </span>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    </div>
+                )}
+
+                <div className="glass-card rounded-xl p-6" style={{ borderRadius: '0.75rem', padding: '1.5rem' }}>
+                    <h3 className="text-xl font-bold text-slate-200 mb-4" style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#e2e8f0', marginBottom: '1rem' }}>Активные задачи</h3>
+                    <div className="space-y-3" style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+                        {tasks.filter(t => t.status !== 'completed').slice(0, 5).map(task => {
+                            const employee = employees.find(e => e.id === task.employeeId);
+                            const isOverdue = new Date(task.deadline) < new Date();
+                            return (
+                                <div key={task.id} className="bg-slate-800/50 rounded-lg p-4 border border-slate-700/50 hover:border-amber-500/30 transition-all relative overflow-hidden" style={{ backgroundColor: 'rgba(30, 41, 59, 0.5)', borderRadius: '0.5rem', padding: '1rem', border: '1px solid rgba(51, 65, 85, 0.5)', position: 'relative', overflow: 'hidden' }}>
+                                    <div className={`priority-indicator ${task.priority === 'high' ? 'bg-red-500' : task.priority === 'medium' ? 'bg-yellow-500' : 'bg-green-500'}`} style={{ width: '4px', height: '100%', position: 'absolute', left: 0, top: 0, borderRadius: '8px 0 0 8px', backgroundColor: task.priority === 'high' ? '#ef4444' : task.priority === 'medium' ? '#eab308' : '#22c55e' }}></div>
+                                    <div style={{ paddingLeft: '1rem' }}>
+                                        <div className="flex justify-between items-start" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'start' }}>
+                                            <div style={{ flex: 1 }}>
+                                                <h4 className="text-slate-200 font-semibold" style={{ color: '#e2e8f0', fontWeight: '600' }}>{task.title}</h4>
+                                                <p className="text-slate-400 text-sm mt-1" style={{ color: '#94a3b8', fontSize: '0.875rem', marginTop: '0.25rem' }}>{task.description}</p>
+                                                <div className="flex items-center gap-4 mt-2 text-xs text-slate-500" style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginTop: '0.5rem', fontSize: '0.75rem', color: '#64748b' }}>
+                                                    <span className="flex items-center gap-1" style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                                                        <Icon name="user" size={14} /> {employee?.name}
+                                                    </span>
+                                                    <span className={`flex items-center gap-1 ${isOverdue ? 'text-red-400 font-semibold' : ''}`} style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', color: isOverdue ? '#f87171' : undefined, fontWeight: isOverdue ? '600' : undefined }}>
+                                                        <Icon name="calendar" size={14} /> {new Date(task.deadline).toLocaleDateString('ru-RU')}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                            <span className={`status-badge ${task.status === 'new' ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30' : 'bg-purple-500/20 text-purple-400 border border-purple-500/30'}`} style={{ padding: '0.25rem 0.75rem', borderRadius: '9999px', fontSize: '0.75rem', fontWeight: '600', backgroundColor: task.status === 'new' ? 'rgba(59, 130, 246, 0.2)' : 'rgba(168, 85, 247, 0.2)', color: task.status === 'new' ? '#60a5fa' : '#c084fc', border: task.status === 'new' ? '1px solid rgba(59, 130, 246, 0.3)' : '1px solid rgba(168, 85, 247, 0.3)' }}>
+                                                {task.status === 'new' ? 'Новая' : 'В работе'}
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
+                            );
+                        })}
+                        {tasks.filter(t => t.status !== 'completed').length === 0 && (
+                            <p className="text-slate-500 text-center py-8" style={{ color: '#64748b', textAlign: 'center', padding: '2rem 0' }}>Нет активных задач</p>
+                        )}
+                    </div>
+                </div>
+            </div>
+        );
+
+        // Tasks View Component (simplified for space)
+        const TasksView = ({ tasks, employees, searchQuery, setSearchQuery, filterStatus, setFilterStatus, filterEmployee, setFilterEmployee, updateTaskStatus, deleteTask, setEditingTask, setShowTaskModal }) => (
+            <div className="animate-slide-in space-y-6">
+                <div className="flex flex-col md:flex-row gap-4 items-start md:items-center justify-between" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '1.5rem' }}>
+                    <h2 className="text-2xl font-bold text-slate-200" style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#e2e8f0' }}>Все задачи</h2>
+                    <button onClick={() => { setEditingTask(null); setShowTaskModal(true); }} className="btn-primary text-white px-6 py-3 rounded-lg font-semibold flex items-center gap-2" style={{ padding: '0.75rem 1.5rem', borderRadius: '0.5rem', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <Icon name="plus" size={20} /> Создать задачу
+                    </button>
+                </div>
+
+                <div className="glass-card rounded-xl p-4 flex flex-col md:flex-row gap-4" style={{ borderRadius: '0.75rem', padding: '1rem', display: 'flex', gap: '1rem' }}>
+                    <div className="flex-1 relative" style={{ flex: 1, position: 'relative' }}>
+                        <Icon name="search" size={18} style={{ position: 'absolute', left: '0.75rem', top: '50%', transform: 'translateY(-50%)', color: '#94a3b8' }} />
+                        <input type="text" placeholder="Поиск задач..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="w-full bg-slate-800/50 border border-slate-700 rounded-lg pl-10 pr-4 py-2 text-slate-200 focus:outline-none focus:border-amber-500/50" style={{ width: '100%', backgroundColor: 'rgba(30, 41, 59, 0.5)', border: '1px solid #334155', borderRadius: '0.5rem', paddingLeft: '2.5rem', paddingRight: '1rem', paddingTop: '0.5rem', paddingBottom: '0.5rem', color: '#e2e8f0' }} />
+                    </div>
+                    <select value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)} className="bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-2 text-slate-200" style={{ backgroundColor: 'rgba(30, 41, 59, 0.5)', border: '1px solid #334155', borderRadius: '0.5rem', padding: '0.5rem 1rem', color: '#e2e8f0' }}>
+                        <option value="all">Все статусы</option>
+                        <option value="new">Новые</option>
+                        <option value="in_progress">В работе</option>
+                        <option value="completed">Выполненные</option>
+                    </select>
+                    <select value={filterEmployee} onChange={(e) => setFilterEmployee(e.target.value)} className="bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-2 text-slate-200" style={{ backgroundColor: 'rgba(30, 41, 59, 0.5)', border: '1px solid #334155', borderRadius: '0.5rem', padding: '0.5rem 1rem', color: '#e2e8f0' }}>
+                        <option value="all">Все сотрудники</option>
+                        {employees.map(emp => <option key={emp.id} value={emp.id}>{emp.name}</option>)}
+                    </select>
+                </div>
+
+                <div className="glass-card rounded-xl overflow-hidden" style={{ borderRadius: '0.75rem', overflow: 'hidden' }}>
+                    <div className="overflow-x-auto">
+                        <table className="w-full" style={{ width: '100%' }}>
+                            <thead className="bg-slate-800/50 border-b border-slate-700" style={{ backgroundColor: 'rgba(30, 41, 59, 0.5)', borderBottom: '1px solid #334155' }}>
+                                <tr>
+                                    <th className="px-6 py-4 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider" style={{ padding: '1rem 1.5rem', textAlign: 'left', fontSize: '0.75rem', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase' }}>Задача</th>
+                                    <th className="px-6 py-4 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider" style={{ padding: '1rem 1.5rem', textAlign: 'left', fontSize: '0.75rem', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase' }}>Сотрудник</th>
+                                    <th className="px-6 py-4 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider" style={{ padding: '1rem 1.5rem', textAlign: 'left', fontSize: '0.75rem', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase' }}>Срок</th>
+                                    <th className="px-6 py-4 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider" style={{ padding: '1rem 1.5rem', textAlign: 'left', fontSize: '0.75rem', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase' }}>Приоритет</th>
+                                    <th className="px-6 py-4 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider" style={{ padding: '1rem 1.5rem', textAlign: 'left', fontSize: '0.75rem', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase' }}>Статус</th>
+                                    <th className="px-6 py-4 text-left text-xs font-semibold text-slate-400 uppercase tracking-wider" style={{ padding: '1rem 1.5rem', textAlign: 'left', fontSize: '0.75rem', fontWeight: '600', color: '#94a3b8', textTransform: 'uppercase' }}>Действия</th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-700/50">
+                                {tasks.map(task => {
+                                    const employee = employees.find(e => e.id === task.employeeId);
+                                    const isOverdue = task.status !== 'completed' && new Date(task.deadline) < new Date();
+                                    
+                                    return (
+                                        <tr key={task.id} className="hover:bg-slate-800/30 transition-colors" style={{ transition: 'background-color 0.2s' }}>
+                                            <td className="px-6 py-4" style={{ padding: '1rem 1.5rem' }}>
+                                                <div>
+                                                    <div className="text-slate-200 font-medium" style={{ color: '#e2e8f0', fontWeight: '500' }}>{task.title}</div>
+                                                    <div className="text-slate-400 text-sm mt-1" style={{ color: '#94a3b8', fontSize: '0.875rem', marginTop: '0.25rem' }}>{task.description}</div>
+                                                    {task.result && (
+                                                        <div className="text-green-400 text-sm mt-1 flex items-center gap-1" style={{ color: '#4ade80', fontSize: '0.875rem', marginTop: '0.25rem', display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
+                                                            <Icon name="check-circle" size={14} /> Результат: {task.result}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </td>
+                                            <td className="px-6 py-4" style={{ padding: '1rem 1.5rem' }}>
+                                                <div className="text-slate-200" style={{ color: '#e2e8f0' }}>{employee?.name}</div>
+                                                {employee?.telegramTag && <div className="text-slate-400 text-sm" style={{ color: '#94a3b8', fontSize: '0.875rem' }}>@{employee.telegramTag}</div>}
+                                            </td>
+                                            <td className="px-6 py-4" style={{ padding: '1rem 1.5rem' }}>
+                                                <div className={`text-sm ${isOverdue ? 'text-red-400 font-semibold' : 'text-slate-300'}`} style={{ fontSize: '0.875rem', color: isOverdue ? '#f87171' : '#cbd5e1', fontWeight: isOverdue ? '600' : 'normal' }}>
+                                                    {new Date(task.deadline).toLocaleDateString('ru-RU')}
+                                                </div>
+                                                {isOverdue && <div className="text-red-400 text-xs mt-1" style={{ color: '#f87171', fontSize: '0.75rem', marginTop: '0.25rem' }}>Просрочено!</div>}
+                                            </td>
+                                            <td className="px-6 py-4" style={{ padding: '1rem 1.5rem' }}>
+                                                <span className={`px-2 py-1 rounded text-xs font-semibold ${task.priority === 'high' ? 'bg-red-500/20 text-red-400' : task.priority === 'medium' ? 'bg-yellow-500/20 text-yellow-400' : 'bg-green-500/20 text-green-400'}`} style={{ padding: '0.25rem 0.5rem', borderRadius: '0.25rem', fontSize: '0.75rem', fontWeight: '600', backgroundColor: task.priority === 'high' ? 'rgba(239, 68, 68, 0.2)' : task.priority === 'medium' ? 'rgba(234, 179, 8, 0.2)' : 'rgba(34, 197, 94, 0.2)', color: task.priority === 'high' ? '#f87171' : task.priority === 'medium' ? '#facc15' : '#4ade80' }}>
+                                                    {task.priority === 'high' ? 'Высокий' : task.priority === 'medium' ? 'Средний' : 'Низкий'}
+                                                </span>
+                                            </td>
+                                            <td className="px-6 py-4" style={{ padding: '1rem 1.5rem' }}>
+                                                <select value={task.status} onChange={(e) => { const newStatus = e.target.value; if (newStatus === 'completed') { const result = prompt('Введите результат выполнения задачи:'); if (result) updateTaskStatus(task.id, newStatus, result); } else { updateTaskStatus(task.id, newStatus); } }} className={`status-badge cursor-pointer border ${task.status === 'new' ? 'bg-blue-500/20 text-blue-400 border-blue-500/30' : task.status === 'in_progress' ? 'bg-purple-500/20 text-purple-400 border-purple-500/30' : 'bg-green-500/20 text-green-400 border-green-500/30'}`} style={{ cursor: 'pointer', backgroundColor: task.status === 'new' ? 'rgba(59, 130, 246, 0.2)' : task.status === 'in_progress' ? 'rgba(168, 85, 247, 0.2)' : 'rgba(34, 197, 94, 0.2)', color: task.status === 'new' ? '#60a5fa' : task.status === 'in_progress' ? '#c084fc' : '#4ade80', border: task.status === 'new' ? '1px solid rgba(59, 130, 246, 0.3)' : task.status === 'in_progress' ? '1px solid rgba(168, 85, 247, 0.3)' : '1px solid rgba(34, 197, 94, 0.3)' }}>
+                                                    <option value="new">Новая</option>
+                                                    <option value="in_progress">В работе</option>
+                                                    <option value="completed">Выполнена</option>
+                                                </select>
+                                            </td>
+                                            <td className="px-6 py-4" style={{ padding: '1rem 1.5rem' }}>
+                                                <div className="flex items-center gap-2" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                                                    <button onClick={() => { setEditingTask(task); setShowTaskModal(true); }} className="p-2 text-slate-400 hover:text-amber-400 hover:bg-slate-700/50 rounded transition-all" title="Редактировать" style={{ padding: '0.5rem', color: '#94a3b8', borderRadius: '0.25rem', transition: 'all 0.2s' }}>
+                                                        <Icon name="edit-2" size={16} />
+                                                    </button>
+                                                    <button onClick={() => deleteTask(task.id)} className="p-2 text-slate-400 hover:text-red-400 hover:bg-slate-700/50 rounded transition-all" title="Удалить" style={{ padding: '0.5rem', color: '#94a3b8', borderRadius: '0.25rem', transition: 'all 0.2s' }}>
+                                                        <Icon name="trash-2" size={16} />
+                                                    </button>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
+                            </tbody>
+                        </table>
+                        {tasks.length === 0 && (
+                            <div className="text-center py-12 text-slate-500" style={{ textAlign: 'center', padding: '3rem 0', color: '#64748b' }}>
+                                Пока нет задач. Создайте первую!
+                            </div>
+                        )}
+                    </div>
+                </div>
+            </div>
+        );
+
+        // Employees View Component (simplified)
+        const EmployeesView = ({ employees, tasks, setEditingEmployee, setShowEmployeeModal, deleteEmployee }) => (
+            <div className="animate-slide-in space-y-6">
+                <div className="flex items-center justify-between" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.5rem' }}>
+                    <h2 className="text-2xl font-bold text-slate-200" style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#e2e8f0' }}>Сотрудники</h2>
+                    <button onClick={() => { setEditingEmployee(null); setShowEmployeeModal(true); }} className="btn-primary text-white px-6 py-3 rounded-lg font-semibold flex items-center gap-2" style={{ padding: '0.75rem 1.5rem', borderRadius: '0.5rem', fontWeight: '600', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        <Icon name="plus" size={20} /> Добавить сотрудника
+                    </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '1.5rem' }}>
+                    {employees.map(employee => {
+                        const employeeTasks = tasks.filter(t => t.employeeId === employee.id);
+                        const activeTasks = employeeTasks.filter(t => t.status !== 'completed');
+                        const completedTasks = employeeTasks.filter(t => t.status === 'completed');
+                        
+                        return (
+                            <div key={employee.id} className="glass-card rounded-xl p-6 hover:border-amber-500/30 transition-all" style={{ borderRadius: '0.75rem', padding: '1.5rem', transition: 'all 0.3s' }}>
+                                <div className="flex items-start justify-between mb-4" style={{ display: 'flex', alignItems: 'start', justifyContent: 'space-between', marginBottom: '1rem' }}>
+                                    <div style={{ flex: 1 }}>
+                                        <h3 className="text-xl font-bold text-slate-200 mb-1" style={{ fontSize: '1.25rem', fontWeight: 'bold', color: '#e2e8f0', marginBottom: '0.25rem' }}>{employee.name}</h3>
+                                        <p className="text-slate-400 text-sm" style={{ color: '#94a3b8', fontSize: '0.875rem' }}>{employee.position}</p>
+                                        {employee.telegramTag && <p className="text-amber-400 text-sm mt-1" style={{ color: '#fbbf24', fontSize: '0.875rem', marginTop: '0.25rem' }}>@{employee.telegramTag}</p>}
+                                    </div>
+                                    <div className="flex gap-1" style={{ display: 'flex', gap: '0.25rem' }}>
+                                        <button onClick={() => { setEditingEmployee(employee); setShowEmployeeModal(true); }} className="p-2 text-slate-400 hover:text-amber-400 hover:bg-slate-700/50 rounded transition-all" style={{ padding: '0.5rem', color: '#94a3b8', borderRadius: '0.25rem', transition: 'all 0.2s' }}>
+                                            <Icon name="edit-2" size={16} />
+                                        </button>
+                                        <button onClick={() => deleteEmployee(employee.id)} className="p-2 text-slate-400 hover:text-red-400 hover:bg-slate-700/50 rounded transition-all" style={{ padding: '0.5rem', color: '#94a3b8', borderRadius: '0.25rem', transition: 'all 0.2s' }}>
+                                            <Icon name="trash-2" size={16} />
+                                        </button>
+                                    </div>
+                                </div>
+                                
+                                <div className="space-y-2" style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                                    <div className="flex justify-between items-center" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                        <span className="text-slate-400 text-sm" style={{ color: '#94a3b8', fontSize: '0.875rem' }}>Активных задач:</span>
+                                        <span className="text-slate-200 font-semibold" style={{ color: '#e2e8f0', fontWeight: '600' }}>{activeTasks.length}</span>
+                                    </div>
+                                    <div className="flex justify-between items-center" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                        <span className="text-slate-400 text-sm" style={{ color: '#94a3b8', fontSize: '0.875rem' }}>Выполнено:</span>
+                                        <span className="text-green-400 font-semibold" style={{ color: '#4ade80', fontWeight: '600' }}>{completedTasks.length}</span>
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    })}
+                    
+                    {employees.length === 0 && (
+                        <div className="col-span-full text-center py-12 text-slate-500" style={{ gridColumn: '1 / -1', textAlign: 'center', padding: '3rem 0', color: '#64748b' }}>
+                            Нет сотрудников. Добавьте первого!
+                        </div>
+                    )}
+                </div>
+            </div>
+        );
+
+        // Modal Components
+        const TaskModal = ({ task, employees, onSave, onClose }) => {
+            const [formData, setFormData] = useState({
+                title: task?.title || '',
+                description: task?.description || '',
+                employeeId: task?.employeeId || employees[0]?.id || '',
+                deadline: task?.deadline || new Date().toISOString().split('T')[0],
+                priority: task?.priority || 'medium',
+                status: task?.status || 'new'
+            });
+
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                if (!formData.title || !formData.employeeId) {
+                    alert('Заполните все обязательные поля');
+                    return;
+                }
+                onSave(formData);
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fade-in" style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0, 0, 0, 0.6)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, padding: '1rem' }} onClick={onClose}>
+                    <div className="glass-card rounded-2xl p-8 max-w-2xl w-full max-h-[90vh] overflow-y-auto animate-slide-in" style={{ borderRadius: '1rem', padding: '2rem', maxWidth: '42rem', width: '100%', maxHeight: '90vh', overflowY: 'auto' }} onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-center justify-between mb-6" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.5rem' }}>
+                            <h2 className="text-2xl font-bold text-slate-200" style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#e2e8f0' }}>
+                                {task ? 'Редактировать задачу' : 'Новая задача'}
+                            </h2>
+                            <button onClick={onClose} className="text-slate-400 hover:text-slate-200" style={{ color: '#94a3b8' }}>
+                                <Icon name="x" size={24} />
+                            </button>
+                        </div>
+
+                        <form onSubmit={handleSubmit} className="space-y-6" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                            <div>
+                                <label className="block text-slate-300 text-sm font-semibold mb-2" style={{ display: 'block', color: '#cbd5e1', fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem' }}>
+                                    Название задачи *
+                                </label>
+                                <input type="text" value={formData.title} onChange={(e) => setFormData({ ...formData, title: e.target.value })} className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-3 text-slate-200 focus:outline-none focus:border-amber-500/50" placeholder="Например: Подготовить отчёт по продажам" required style={{ width: '100%', backgroundColor: 'rgba(30, 41, 59, 0.5)', border: '1px solid #334155', borderRadius: '0.5rem', padding: '0.75rem 1rem', color: '#e2e8f0' }} />
+                            </div>
+
+                            <div>
+                                <label className="block text-slate-300 text-sm font-semibold mb-2" style={{ display: 'block', color: '#cbd5e1', fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem' }}>
+                                    Описание
+                                </label>
+                                <textarea value={formData.description} onChange={(e) => setFormData({ ...formData, description: e.target.value })} className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-3 text-slate-200 focus:outline-none focus:border-amber-500/50 h-24 resize-none" placeholder="Подробное описание задачи..." style={{ width: '100%', backgroundColor: 'rgba(30, 41, 59, 0.5)', border: '1px solid #334155', borderRadius: '0.5rem', padding: '0.75rem 1rem', color: '#e2e8f0', height: '6rem', resize: 'none' }} />
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem' }}>
+                                <div>
+                                    <label className="block text-slate-300 text-sm font-semibold mb-2" style={{ display: 'block', color: '#cbd5e1', fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem' }}>
+                                        Сотрудник *
+                                    </label>
+                                    <select value={formData.employeeId} onChange={(e) => setFormData({ ...formData, employeeId: e.target.value })} className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-3 text-slate-200 focus:outline-none focus:border-amber-500/50" required style={{ width: '100%', backgroundColor: 'rgba(30, 41, 59, 0.5)', border: '1px solid #334155', borderRadius: '0.5rem', padding: '0.75rem 1rem', color: '#e2e8f0' }}>
+                                        <option value="">Выберите сотрудника</option>
+                                        {employees.map(emp => <option key={emp.id} value={emp.id}>{emp.name}</option>)}
+                                    </select>
+                                </div>
+
+                                <div>
+                                    <label className="block text-slate-300 text-sm font-semibold mb-2" style={{ display: 'block', color: '#cbd5e1', fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem' }}>
+                                        Срок выполнения *
+                                    </label>
+                                    <input type="date" value={formData.deadline} onChange={(e) => setFormData({ ...formData, deadline: e.target.value })} className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-3 text-slate-200 focus:outline-none focus:border-amber-500/50" required style={{ width: '100%', backgroundColor: 'rgba(30, 41, 59, 0.5)', border: '1px solid #334155', borderRadius: '0.5rem', padding: '0.75rem 1rem', color: '#e2e8f0' }} />
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-4" style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem' }}>
+                                <div>
+                                    <label className="block text-slate-300 text-sm font-semibold mb-2" style={{ display: 'block', color: '#cbd5e1', fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem' }}>
+                                        Приоритет
+                                    </label>
+                                    <select value={formData.priority} onChange={(e) => setFormData({ ...formData, priority: e.target.value })} className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-3 text-slate-200 focus:outline-none focus:border-amber-500/50" style={{ width: '100%', backgroundColor: 'rgba(30, 41, 59, 0.5)', border: '1px solid #334155', borderRadius: '0.5rem', padding: '0.75rem 1rem', color: '#e2e8f0' }}>
+                                        <option value="low">Низкий</option>
+                                        <option value="medium">Средний</option>
+                                        <option value="high">Высокий</option>
+                                    </select>
+                                </div>
+
+                                {task && (
+                                    <div>
+                                        <label className="block text-slate-300 text-sm font-semibold mb-2" style={{ display: 'block', color: '#cbd5e1', fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem' }}>
+                                            Статус
+                                        </label>
+                                        <select value={formData.status} onChange={(e) => setFormData({ ...formData, status: e.target.value })} className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-3 text-slate-200 focus:outline-none focus:border-amber-500/50" style={{ width: '100%', backgroundColor: 'rgba(30, 41, 59, 0.5)', border: '1px solid #334155', borderRadius: '0.5rem', padding: '0.75rem 1rem', color: '#e2e8f0' }}>
+                                            <option value="new">Новая</option>
+                                            <option value="in_progress">В работе</option>
+                                            <option value="completed">Выполнена</option>
+                                        </select>
+                                    </div>
+                                )}
+                            </div>
+
+                            <div className="flex gap-3 pt-4" style={{ display: 'flex', gap: '0.75rem', paddingTop: '1rem' }}>
+                                <button type="submit" className="flex-1 btn-primary text-white px-6 py-3 rounded-lg font-semibold" style={{ flex: 1, padding: '0.75rem 1.5rem', borderRadius: '0.5rem', fontWeight: '600' }}>
+                                    {task ? 'Сохранить изменения' : 'Создать задачу'}
+                                </button>
+                                <button type="button" onClick={onClose} className="px-6 py-3 bg-slate-700/50 text-slate-300 rounded-lg font-semibold hover:bg-slate-700 transition-all" style={{ padding: '0.75rem 1.5rem', backgroundColor: 'rgba(51, 65, 85, 0.5)', color: '#cbd5e1', borderRadius: '0.5rem', fontWeight: '600', transition: 'all 0.2s' }}>
+                                    Отмена
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            );
+        };
+
+        const EmployeeModal = ({ employee, onSave, onClose }) => {
+            const [formData, setFormData] = useState({
+                name: employee?.name || '',
+                position: employee?.position || '',
+                telegramTag: employee?.telegramTag || ''
+            });
+
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                if (!formData.name) {
+                    alert('Введите имя сотрудника');
+                    return;
+                }
+                onSave(formData);
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fade-in" style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0, 0, 0, 0.6)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, padding: '1rem' }} onClick={onClose}>
+                    <div className="glass-card rounded-2xl p-8 max-w-md w-full animate-slide-in" style={{ borderRadius: '1rem', padding: '2rem', maxWidth: '28rem', width: '100%' }} onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-center justify-between mb-6" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.5rem' }}>
+                            <h2 className="text-2xl font-bold text-slate-200" style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#e2e8f0' }}>
+                                {employee ? 'Редактировать сотрудника' : 'Новый сотрудник'}
+                            </h2>
+                            <button onClick={onClose} className="text-slate-400 hover:text-slate-200" style={{ color: '#94a3b8' }}>
+                                <Icon name="x" size={24} />
+                            </button>
+                        </div>
+
+                        <form onSubmit={handleSubmit} className="space-y-6" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                            <div>
+                                <label className="block text-slate-300 text-sm font-semibold mb-2" style={{ display: 'block', color: '#cbd5e1', fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem' }}>
+                                    Имя *
+                                </label>
+                                <input type="text" value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-3 text-slate-200 focus:outline-none focus:border-amber-500/50" placeholder="Иван Иванов" required style={{ width: '100%', backgroundColor: 'rgba(30, 41, 59, 0.5)', border: '1px solid #334155', borderRadius: '0.5rem', padding: '0.75rem 1rem', color: '#e2e8f0' }} />
+                            </div>
+
+                            <div>
+                                <label className="block text-slate-300 text-sm font-semibold mb-2" style={{ display: 'block', color: '#cbd5e1', fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem' }}>
+                                    Должность
+                                </label>
+                                <input type="text" value={formData.position} onChange={(e) => setFormData({ ...formData, position: e.target.value })} className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-3 text-slate-200 focus:outline-none focus:border-amber-500/50" placeholder="Менеджер по продажам" style={{ width: '100%', backgroundColor: 'rgba(30, 41, 59, 0.5)', border: '1px solid #334155', borderRadius: '0.5rem', padding: '0.75rem 1rem', color: '#e2e8f0' }} />
+                            </div>
+
+                            <div>
+                                <label className="block text-slate-300 text-sm font-semibold mb-2" style={{ display: 'block', color: '#cbd5e1', fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem' }}>
+                                    Telegram (без @)
+                                </label>
+                                <input type="text" value={formData.telegramTag} onChange={(e) => setFormData({ ...formData, telegramTag: e.target.value.replace('@', '') })} className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-3 text-slate-200 focus:outline-none focus:border-amber-500/50" placeholder="username" style={{ width: '100%', backgroundColor: 'rgba(30, 41, 59, 0.5)', border: '1px solid #334155', borderRadius: '0.5rem', padding: '0.75rem 1rem', color: '#e2e8f0' }} />
+                                <p className="text-slate-500 text-xs mt-2" style={{ color: '#64748b', fontSize: '0.75rem', marginTop: '0.5rem' }}>
+                                    Используется для уведомлений и тегов в группе
+                                </p>
+                            </div>
+
+                            <div className="flex gap-3 pt-4" style={{ display: 'flex', gap: '0.75rem', paddingTop: '1rem' }}>
+                                <button type="submit" className="flex-1 btn-primary text-white px-6 py-3 rounded-lg font-semibold" style={{ flex: 1, padding: '0.75rem 1.5rem', borderRadius: '0.5rem', fontWeight: '600' }}>
+                                    {employee ? 'Сохранить' : 'Добавить'}
+                                </button>
+                                <button type="button" onClick={onClose} className="px-6 py-3 bg-slate-700/50 text-slate-300 rounded-lg font-semibold hover:bg-slate-700 transition-all" style={{ padding: '0.75rem 1.5rem', backgroundColor: 'rgba(51, 65, 85, 0.5)', color: '#cbd5e1', borderRadius: '0.5rem', fontWeight: '600', transition: 'all 0.2s' }}>
+                                    Отмена
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            );
+        };
+
+        const ConfigModal = ({ config, onSave, onClose }) => {
+            const [formData, setFormData] = useState(config);
+            const [testing, setTesting] = useState(false);
+
+            const handleTest = async () => {
+                if (!formData.botToken || !formData.chatId) {
+                    alert('Введите токен бота и ID чата');
+                    return;
+                }
+
+                setTesting(true);
+                const result = await sendTelegramNotification(
+                    formData.botToken,
+                    formData.chatId,
+                    '🎉 <b>Тестовое сообщение</b>\n\nИнтеграция Telegram работает корректно!'
+                );
+                setTesting(false);
+
+                if (result.success) {
+                    alert('✅ Сообщение отправлено! Проверьте Telegram-группу.');
+                } else {
+                    alert('❌ Ошибка: ' + result.error);
+                }
+            };
+
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                onSave(formData);
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fade-in" style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0, 0, 0, 0.6)', backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 50, padding: '1rem' }} onClick={onClose}>
+                    <div className="glass-card rounded-2xl p-8 max-w-2xl w-full max-h-[90vh] overflow-y-auto animate-slide-in" style={{ borderRadius: '1rem', padding: '2rem', maxWidth: '42rem', width: '100%', maxHeight: '90vh', overflowY: 'auto' }} onClick={(e) => e.stopPropagation()}>
+                        <div className="flex items-center justify-between mb-6" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.5rem' }}>
+                            <h2 className="text-2xl font-bold text-slate-200" style={{ fontSize: '1.5rem', fontWeight: 'bold', color: '#e2e8f0' }}>Настройка Telegram</h2>
+                            <button onClick={onClose} className="text-slate-400 hover:text-slate-200" style={{ color: '#94a3b8' }}>
+                                <Icon name="x" size={24} />
+                            </button>
+                        </div>
+
+                        <form onSubmit={handleSubmit} className="space-y-6" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+                            <div className="bg-blue-500/10 border border-blue-500/30 rounded-lg p-4 mb-6" style={{ backgroundColor: 'rgba(59, 130, 246, 0.1)', border: '1px solid rgba(59, 130, 246, 0.3)', borderRadius: '0.5rem', padding: '1rem', marginBottom: '1.5rem' }}>
+                                <h3 className="text-blue-400 font-semibold mb-2" style={{ color: '#60a5fa', fontWeight: '600', marginBottom: '0.5rem' }}>📱 Как настроить Telegram бота:</h3>
+                                <ol className="text-slate-300 text-sm space-y-2 list-decimal list-inside" style={{ color: '#cbd5e1', fontSize: '0.875rem', display: 'flex', flexDirection: 'column', gap: '0.5rem', paddingLeft: '1.25rem', listStyleType: 'decimal' }}>
+                                    <li>Найдите в Telegram бота <code className="bg-slate-800 px-2 py-1 rounded" style={{ backgroundColor: '#1e293b', padding: '0.25rem 0.5rem', borderRadius: '0.25rem' }}>@BotFather</code></li>
+                                    <li>Отправьте команду <code className="bg-slate-800 px-2 py-1 rounded" style={{ backgroundColor: '#1e293b', padding: '0.25rem 0.5rem', borderRadius: '0.25rem' }}>/newbot</code></li>
+                                    <li>Следуйте инструкциям, чтобы создать бота</li>
+                                    <li>Скопируйте токен бота</li>
+                                    <li>Добавьте бота в вашу Telegram-группу как администратора</li>
+                                    <li>Отправьте в группу любое сообщение</li>
+                                    <li>Откройте в браузере: <code className="text-xs bg-slate-800 px-1 rounded" style={{ fontSize: '0.75rem', backgroundColor: '#1e293b', padding: '0.25rem', borderRadius: '0.25rem' }}>https://api.telegram.org/bot[ВАШ_ТОКЕН]/getUpdates</code></li>
+                                    <li>Найдите <code className="bg-slate-800 px-1 rounded" style={{ backgroundColor: '#1e293b', padding: '0.25rem', borderRadius: '0.25rem' }}>chat.id</code> (обычно отрицательное число)</li>
+                                </ol>
+                            </div>
+
+                            <div>
+                                <label className="block text-slate-300 text-sm font-semibold mb-2" style={{ display: 'block', color: '#cbd5e1', fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem' }}>
+                                    Токен Telegram бота
+                                </label>
+                                <input type="text" value={formData.botToken} onChange={(e) => setFormData({ ...formData, botToken: e.target.value })} className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-3 text-slate-200 focus:outline-none focus:border-amber-500/50 font-mono text-sm" placeholder="123456789:ABCdefGHIjklMNOpqrsTUVwxyz" style={{ width: '100%', backgroundColor: 'rgba(30, 41, 59, 0.5)', border: '1px solid #334155', borderRadius: '0.5rem', padding: '0.75rem 1rem', color: '#e2e8f0', fontFamily: 'monospace', fontSize: '0.875rem' }} />
+                            </div>
+
+                            <div>
+                                <label className="block text-slate-300 text-sm font-semibold mb-2" style={{ display: 'block', color: '#cbd5e1', fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem' }}>
+                                    ID чата (группы)
+                                </label>
+                                <input type="text" value={formData.chatId} onChange={(e) => setFormData({ ...formData, chatId: e.target.value })} className="w-full bg-slate-800/50 border border-slate-700 rounded-lg px-4 py-3 text-slate-200 focus:outline-none focus:border-amber-500/50 font-mono text-sm" placeholder="-1001234567890" style={{ width: '100%', backgroundColor: 'rgba(30, 41, 59, 0.5)', border: '1px solid #334155', borderRadius: '0.5rem', padding: '0.75rem 1rem', color: '#e2e8f0', fontFamily: 'monospace', fontSize: '0.875rem' }} />
+                            </div>
+
+                            <div className="flex gap-3 pt-4" style={{ display: 'flex', gap: '0.75rem', paddingTop: '1rem' }}>
+                                <button type="button" onClick={handleTest} disabled={testing} className="flex-1 bg-blue-500 hover:bg-blue-600 text-white px-6 py-3 rounded-lg font-semibold flex items-center justify-center gap-2 transition-all disabled:opacity-50" style={{ flex: 1, backgroundColor: '#3b82f6', color: 'white', padding: '0.75rem 1.5rem', borderRadius: '0.5rem', fontWeight: '600', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem', transition: 'all 0.2s', cursor: testing ? 'not-allowed' : 'pointer', opacity: testing ? 0.5 : 1 }}>
+                                    <Icon name="send" size={20} />
+                                    {testing ? 'Отправка...' : 'Тестировать'}
+                                </button>
+                                <button type="submit" className="flex-1 btn-primary text-white px-6 py-3 rounded-lg font-semibold" style={{ flex: 1, padding: '0.75rem 1.5rem', borderRadius: '0.5rem', fontWeight: '600' }}>
+                                    Сохранить
+                                </button>
+                                <button type="button" onClick={onClose} className="px-6 py-3 bg-slate-700/50 text-slate-300 rounded-lg font-semibold hover:bg-slate-700 transition-all" style={{ padding: '0.75rem 1.5rem', backgroundColor: 'rgba(51, 65, 85, 0.5)', color: '#cbd5e1', borderRadius: '0.5rem', fontWeight: '600', transition: 'all 0.2s' }}>
+                                    Отмена
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            );
+        };
+
+        // Render the app
+        const root = createRoot(document.getElementById('root'));
+        root.render(<TaskManager />);
+    </script>
+</body>
+</html>
